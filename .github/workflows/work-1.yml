@@ -4,7 +4,7 @@ on:
     paths:
       - '.github/workflows/**'
       - 'src/**'
-      - 'build.gradle'
+      - 'build.gradle.kts'
       - 'Dockerfile'
     branches:
       - main
