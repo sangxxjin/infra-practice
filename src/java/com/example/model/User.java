@@ -22,6 +22,7 @@ public class User {
 		this.name = name;
 	}
 
+
 	// 코드리뷰 getter 지적
 	public String getEmail() {
 		return email;
