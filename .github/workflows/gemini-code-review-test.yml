@@ -87,7 +87,7 @@ jobs:
             2. The exact line number calculated from the diff hunk header
             3. The diff_hunk which is the patch/context of the code you're commenting on
 
-            The output format MUST be a valid JSON array: [{"path":"{ filepath }", "line": { line }, "diff_hunk": "{ the code context from diff }", "body": "{ review comment }", "commit_id": "${{ github.event.pull_request.head.sha }}"}]
+            The output format MUST be a valid JSON array: [{"path":"{ filepath }", "line": { line }, "diff_hunk": "{ the code context from diff }", "body": "{ review comment }", "commit_id": "${{ github.event.pull_request.head.sha }}"}]. All 'line' values must be valid integers.
 
             Only include files and lines that actually exist in the diff. Avoid commenting on files with non-ASCII characters in their paths.
             If you detect that a code block was removed and then re-added, please comment on whether that makes sense or seems unnecessary.
@@ -118,7 +118,7 @@ jobs:
           echo "$CLEANED_COMMENT"
           echo "==============================="
           # 유효하지 않은 문자 제거 및 JSON 파싱 시도
-          COMMENT=$(echo "$CLEANED_COMMENT" | sed 's/[\x00-\x1F]//g' | sed 's/\\/\\\\/g' | jq -c . || echo "[]")
+          COMMENT=$(echo "$CLEANED_COMMENT" | sed 's/[^[:print:]]//g' | jq -c . || echo "[]")
           echo "comment=$COMMENT" >> $GITHUB_OUTPUT
 
       - name: Add Pull Request Review Comment # PR에 코드 리뷰 코멘트 추가 단계
