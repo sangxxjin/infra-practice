@@ -111,6 +111,7 @@ jobs:
           cat review_result.txt
           COMMENT=$(sed '/^```/d' review_result.txt | sed '/^```json/d' | sed '/^```javascript/d' | jq -c . || echo "[]")
           echo "comment=$COMMENT" >> $GITHUB_OUTPUT
+
       - name:
           Debug: Print REVIEW_COMMENTS
         if: github.event_name == 'pull_request'
