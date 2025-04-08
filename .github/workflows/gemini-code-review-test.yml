@@ -2,7 +2,7 @@ name: Gemini Code Review
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
     paths:
       - 'src/**'
   pull_request:
@@ -51,23 +51,22 @@ jobs:
           script: |
             const fs = require("fs");
             const diff_output = fs.readFileSync("diff.txt",'utf8');
-            
+
             const { GoogleGenerativeAI } = require("@google/generative-ai");
             const genAI = new GoogleGenerativeAI("${{ secrets.GEMINI_API_KEY }}");
             const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash"});
-            
-            // PR과 Push에 따라 다른 프롬프트 사용
+
             let prompt;
             if (process.env.EVENT_TYPE === 'pull_request') {
-              prompt = `Explain in korean. You are a senior software engineer and need to perform a code review based on the results of a given git diff. Review the changed code from different perspectives and let us know if there are any changes that need to be made. If you see any code that needs to be fixed in the result of the git diff, you need to calculate the exact line number by referring to the "@@ -0,0 +0,0 @@" part. The output format is \[{"path":"{ filepath }", "line": { line }, "text": { review comment }, "side": "RIGHT"}\] format must be respected.\n<git diff>${diff_output}</git diff>`;
+              prompt = `Explain in korean. You are a senior software engineer and need to perform a code review based on the results of a given git diff. Review the changed code and provide specific feedback for each issue. To determine the exact line number, carefully examine the "@@ -old_start,old_lines +new_start,new_lines @@" section. The lines starting with '+' indicate added lines. You must calculate the **new line number** by taking the \`new_start\` value and adding the relative line number within the added block. For example, if \`@@ -10,2 +12,3 @@\` and the changed line is the second '+' line, the line number should be 12 + 1 = 13. The output must be a JSON array of objects in the following format: \`[{"path":"{filepath}", "line": {line_number}, "text": "{review_comment}", "side": "RIGHT"}]\`. Ensure the file path is correct and the line number accurately reflects the **new line** in the modified file.\n<git diff>${diff_output}</git diff>`;
             } else {
               prompt = `Explain in korean. You are a senior software engineer and need to perform a code review based on the results of a given git diff. Provide a detailed review of the code changes, focusing on code quality, readability, performance, and security. Format your response in Markdown with clear headings for each file reviewed.\n<git diff>${diff_output}</git diff>`;
             }
-            
+
             const result = await model.generateContent(prompt);
             const response = await result.response;
             const text = response.text();
-            
+
             fs.writeFileSync('review_result.txt', text);
             console.log('Review results saved!');
 
