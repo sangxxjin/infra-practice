@@ -15,6 +15,7 @@ public class User {
 
 	public boolean isAdult() {
 		return age >= 18;
+
 	}
 
 	//코드리뷰 setter지적
