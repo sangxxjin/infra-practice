@@ -23,80 +23,319 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v3
 
-      - name: Install GoogleGenerativeAI
+      - name: Install dependencies
         run: |
           npm install @google/generative-ai
 
-      # PR 이벤트에서의 변경사항 처리
-      - name: Get git diff for PR
-        if: github.event_name == 'pull_request'
-        run: |
-          git fetch origin "${{ github.event.pull_request.base.ref }}"
-          git fetch origin "${{ github.event.pull_request.head.ref }}"
-          git diff --unified=0 "origin/${{ github.event.pull_request.base.ref }}" > "diff.txt"
-          echo "EVENT_TYPE=pull_request" >> $GITHUB_ENV
-
-      # Push 이벤트에서의 변경사항 처리
-      - name: Get git diff for Push
-        if: github.event_name == 'push'
-        run: |
-          git diff --unified=0 HEAD^ HEAD > "diff.txt"
-          echo "EVENT_TYPE=push" >> $GITHUB_ENV
-
-      # Gemini를 사용한 코드 분석
-      - name: Run Gemini-1.5-flash
+      - name: Analyze code changes and generate review comments
         id: gemini_review
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require("fs");
-            const diff_output = fs.readFileSync("diff.txt",'utf8');
-            
+            const { execSync } = require("child_process");
             const { GoogleGenerativeAI } = require("@google/generative-ai");
-            const genAI = new GoogleGenerativeAI("${{ secrets.GEMINI_API_KEY }}");
-            const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash"});
             
-            let prompt;
-            if (process.env.EVENT_TYPE === 'pull_request') {
-              prompt = `Explain in korean. You are a senior software engineer and need to perform a code review based on the results of a given git diff. Review the changed code and provide specific feedback for each issue. To determine the exact line number, carefully examine the "@@ -old_start,old_lines +new_start,new_lines @@" section. The lines starting with '+' indicate added lines. You must calculate the **new line number** by taking the \`new_start\` value and adding the relative line number within the added block. For example, if \`@@ -10,2 +12,3 @@\` and the changed line is the second '+' line, the line number should be 12 + 1 = 13. The output must be a JSON array of objects in the following format: \`[{"path":"{filepath}", "line": {line_number}, "text": "{review_comment}", "side": "RIGHT"}]\`. Ensure the file path is correct and the line number accurately reflects the **new line** in the modified file.\n<git diff>${diff_output}</git diff>`;
+            const genAI = new GoogleGenerativeAI("${{ secrets.GEMINI_API_KEY }}");
+            const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+            
+            // 이벤트 타입 확인
+            const isPullRequest = context.eventName === 'pull_request';
+            let fileChanges = [];
+
+            if (isPullRequest) {
+              // PR의 경우 GitHub API를 통해 파일 변경 정보 획득
+              console.log("Processing pull request...");
+              const { data: files } = await github.rest.pulls.listFiles({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: context.issue.number
+              });
+            
+              // src 디렉토리 내 파일만 필터링
+              fileChanges = files
+                .filter(file => file.filename.startsWith('src/'))
+                .map(file => {
+                  // 각 허킷(hunk)별로 라인 정보 파싱
+                  const hunks = [];
+                  if (file.patch) {
+                    const lines = file.patch.split('\n');
+                    let currentHunk = null;
+                    let lineCounter = 0;
+            
+                    for (const line of lines) {
+                      if (line.startsWith('@@')) {
+                        // 새로운 허킷의 시작
+                        const match = line.match(/@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+                        if (match) {
+                          currentHunk = {
+                            startLine: parseInt(match[1], 10),
+                            content: [line],
+                            addedLines: []
+                          };
+                          lineCounter = currentHunk.startLine;
+                          hunks.push(currentHunk);
+                        }
+                      } else if (currentHunk) {
+                        currentHunk.content.push(line);
+            
+                        if (line.startsWith('+') && !line.startsWith('++')) {
+                          // 추가된 라인 정보 저장
+                          currentHunk.addedLines.push({
+                            lineNumber: lineCounter,
+                            content: line.substring(1)
+                          });
+                        }
+            
+                        // '+' 또는 ' ' 라인인 경우만 라인 카운터 증가 ('-'는 제외)
+                        if (!line.startsWith('-')) {
+                          lineCounter++;
+                        }
+                      }
+                    }
+                  }
+            
+                  return {
+                    path: file.filename,
+                    status: file.status,
+                    hunks: hunks,
+                    addedLines: hunks.flatMap(h => h.addedLines),
+                    patch: file.patch || ''
+                  };
+                });
             } else {
-              prompt = `Explain in korean. You are a senior software engineer and need to perform a code review based on the results of a given git diff. Provide a detailed review of the code changes, focusing on code quality, readability, performance, and security. Format your response in Markdown with clear headings for each file reviewed.\n<git diff>${diff_output}</git diff>`;
+              // Push 이벤트의 경우
+              console.log("Processing push event...");
+              // 변경된 파일 목록 가져오기
+              const changedFiles = execSync('git diff --name-only HEAD^ HEAD')
+                .toString().trim().split('\n')
+                .filter(file => file.startsWith('src/'));
+            
+              for (const filePath of changedFiles) {
+                try {
+                  // 파일별 diff 정보 가져오기
+                  const fileDiff = execSync(`git diff --unified=3 HEAD^ HEAD -- "${filePath}"`).toString();
+            
+                  if (!fileDiff) continue;
+            
+                  // 허킷별로 라인 정보 파싱
+                  const hunks = [];
+                  const lines = fileDiff.split('\n');
+                  let currentHunk = null;
+                  let lineCounter = 0;
+            
+                  for (const line of lines) {
+                    if (line.startsWith('@@')) {
+                      // 새로운 허킷의 시작
+                      const match = line.match(/@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+                      if (match) {
+                        currentHunk = {
+                          startLine: parseInt(match[1], 10),
+                          content: [line],
+                          addedLines: []
+                        };
+                        lineCounter = currentHunk.startLine;
+                        hunks.push(currentHunk);
+                      }
+                    } else if (currentHunk) {
+                      currentHunk.content.push(line);
+            
+                      if (line.startsWith('+') && !line.startsWith('++')) {
+                        // 추가된 라인 정보 저장
+                        currentHunk.addedLines.push({
+                          lineNumber: lineCounter,
+                          content: line.substring(1)
+                        });
+                      }
+            
+                      // '+' 또는 ' ' 라인인 경우만 라인 카운터 증가 ('-'는 제외)
+                      if (!line.startsWith('-')) {
+                        lineCounter++;
+                      }
+                    }
+                  }
+            
+                  fileChanges.push({
+                    path: filePath,
+                    status: 'modified',
+                    hunks: hunks,
+                    addedLines: hunks.flatMap(h => h.addedLines),
+                    patch: fileDiff
+                  });
+                } catch (error) {
+                  console.error(`Error processing file ${filePath}:`, error);
+                }
+              }
             }
             
-            const result = await model.generateContent(prompt);
-            const response = await result.response;
-            const text = response.text();
+            if (fileChanges.length === 0) {
+              console.log("No relevant file changes found in src/ directory.");
+              return;
+            }
             
-            fs.writeFileSync('review_result.txt', text);
-            console.log('Review results saved!');
-      # PR 이벤트: 라인별 리뷰 코멘트 추가
-      - name: Format and add PR review comments
-        if: env.EVENT_TYPE == 'pull_request'
-        id: store
-        run: |
-          COMMENT=$(sed '/^```/d' review_result.txt | jq -c .)
-          echo "comment=$COMMENT" >> $GITHUB_OUTPUT
-
-      - name: Add Pull Request Review Comment
-        if: env.EVENT_TYPE == 'pull_request'
-        uses: nbaztec/add-pr-review-comment@v1.0.7
-        with:
-          comments: ${{ steps.store.outputs.comment }}
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-          repo-token-user-login: 'github-actions[bot]'
-          allow-repeats: false
-
-      # Push 이벤트: 액션 로그에 리뷰 결과 출력 및 아티팩트 업로드
-      - name: Display review results in workflow log
-        if: env.EVENT_TYPE == 'push'
-        run: |
-          echo "===== Gemini Code Review Results ====="
-          cat review_result.txt
-          echo "======================================"
-
-      - name: Upload review results as artifact
-        if: env.EVENT_TYPE == 'push'
-        uses: actions/upload-artifact@v4
-        with:
-          name: gemini-code-review
-          path: review_result.txt
+            // Gemini API에 전달할 프롬프트 생성
+            let prompt = `Explain in korean. You are a senior software engineer performing a code review.
+            Please review the following code changes and provide specific feedback on potential issues, improvements,
+            and best practices. I will provide exact line numbers for each change.
+            
+            Review these files and focus ONLY on the specific added/modified lines:`;
+              
+              // 각 파일 변경사항 프롬프트에 추가
+              for (const file of fileChanges) {
+            prompt += `\n\nFile: ${file.path}\n`;
+              
+              if (file.addedLines.length === 0) {
+              prompt += "No added lines in this file.\n";
+              continue;
+            }
+  
+            prompt += `Added or modified lines: ${file.addedLines.map(l => l.lineNumber).join(', ')}\n\n`;
+              prompt += `Diff content:\n${file.patch}\n`;
+              
+              // 정확한 라인 매핑 정보 제공
+              prompt += "\nLine number mapping:\n";
+              for (const line of file.addedLines) {
+            prompt += `Line ${line.lineNumber}: ${line.content}\n`;
+            }
+            }
+  
+              // 출력 형식 지정
+              if (isPullRequest) {
+              prompt += `\nGenerate a JSON array of review comments, with each comment addressing a SPECIFIC issue in the code.
+            Use EXACTLY this format (with accurate line numbers from the provided mapping):
+              [
+                {"path": "file_path", "line": exact_line_number, "text": "your review comment", "side": "RIGHT"},
+                ...
+              ]
+              각 코멘트는 한국어로 작성하고, 코드 품질, 성능, 보안, 가독성 측면에서 중요한 문제나 개선점에 초점을 맞추세요.`;
+            } else {
+              prompt += `\nProvide a comprehensive code review in Korean, formatted as Markdown.
+              Use headings for each file and discuss key issues and improvements with precise line number references.
+              Focus on code quality, performance, security, and readability.`;
+            }
+  
+              // Gemini API 호출
+              try {
+              console.log("Sending request to Gemini API...");
+              const result = await model.generateContent(prompt);
+              const response = await result.response;
+              const text = response.text();
+              
+              // 결과 파일 저장
+              fs.writeFileSync('review_result.txt', text);
+              console.log('Review results saved!');
+              
+              // PR 이벤트인 경우 코멘트 형식 검증 및 처리
+              if (isPullRequest) {
+              try {
+              // JSON 응답 파싱
+              let reviewComments;
+              const jsonMatch = text.match(/\[[\s\S]*\]/);
+              
+              if (jsonMatch) {
+              reviewComments = JSON.parse(jsonMatch[0]);
+            } else {
+              throw new Error("Valid JSON array not found in response");
+            }
+  
+              // 라인 번호 유효성 검증
+              const validatedComments = reviewComments.map(comment => {
+              // 파일 존재 여부 확인
+              const fileInfo = fileChanges.find(f => f.path === comment.path);
+              if (!fileInfo) {
+            console.log(`File not found: ${comment.path}`);
+              return null;
+            }
+  
+              // 유효한 라인 번호인지 확인
+              const validLineNumbers = fileInfo.addedLines.map(l => l.lineNumber);
+              
+              if (!validLineNumbers.includes(comment.line)) {
+              console.log(`Invalid line number ${comment.line} in ${comment.path}`);
+              
+              // 가장 가까운 유효한 라인 번호 찾기
+              if (validLineNumbers.length > 0) {
+              const closest = validLineNumbers.reduce((prev, curr) =>
+            Math.abs(curr - comment.line) < Math.abs(prev - comment.line) ? curr : prev
+              );
+            console.log(`Adjusted to closest valid line: ${closest}`);
+              comment.line = closest;
+            } else {
+              return null;
+            }
+            }
+  
+              return comment;
+            }).filter(Boolean);
+              
+              // 검증된 코멘트 저장
+              fs.writeFileSync('validated_comments.json', JSON.stringify(validatedComments, null, 2));
+              
+              // GitHub Actions 출력 변수로 설정
+              core.setOutput('comments', JSON.stringify(validatedComments));
+            } catch (error) {
+              console.error("Error parsing review comments:", error);
+              // 오류 발생 시 원본 텍스트 그대로 반환
+              core.setOutput('review_text', text);
+            }
+            } else {
+              // Push 이벤트인 경우 텍스트 출력만 설정
+              core.setOutput('review_text', text);
+            }
+            } catch (error) {
+              console.error("Error calling Gemini API:", error);
+              core.setFailed("Failed to generate review comments");
+            }
+  
+            - name: Add Pull Request Review Comments
+              if: github.event_name == 'pull_request' && steps.gemini_review.outputs.comments
+              uses: actions/github-script@v7
+              with:
+                script: |
+                  const comments = JSON.parse('${{ steps.gemini_review.outputs.comments }}');
+                  
+                  for (const comment of comments) {
+                    try {
+                      await github.rest.pulls.createReviewComment({
+                        owner: context.repo.owner,
+                        repo: context.repo.repo,
+                        pull_number: context.issue.number,
+                        body: comment.text,
+                        path: comment.path,
+                        line: comment.line,
+                        side: comment.side || 'RIGHT'
+                      });
+                      console.log(`Added comment to ${comment.path}:${comment.line}`);
+                    } catch (error) {
+                      console.error(`Failed to add comment to ${comment.path}:${comment.line}:`, error);
+                    }
+                  }
+  
+            - name: Submit Review
+              if: github.event_name == 'pull_request' && steps.gemini_review.outputs.comments
+              uses: actions/github-script@v7
+              with:
+                script: |
+                  await github.rest.pulls.createReview({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    pull_number: context.issue.number,
+                    body: '## Gemini 코드 리뷰 완료\n\n상세한 코멘트는 각 코드 라인에서 확인해 주세요.',
+                    event: 'COMMENT'
+                  });
+  
+            # Push 이벤트: 액션 로그에 리뷰 결과 출력 및 아티팩트 업로드
+            - name: Display review results in workflow log
+              if: github.event_name == 'push' && steps.gemini_review.outputs.review_text
+              run: |
+                echo "===== Gemini Code Review Results ====="
+                echo "${{ steps.gemini_review.outputs.review_text }}"
+                echo "======================================"
+  
+            - name: Upload review results as artifact
+              uses: actions/upload-artifact@v4
+              with:
+                name: gemini-code-review
+                path: |
+                  review_result.txt
+                  validated_comments.json
