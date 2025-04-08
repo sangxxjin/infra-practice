@@ -117,10 +117,9 @@ jobs:
           echo "===== Cleaned Gemini Output ====="
           echo "$CLEANED_COMMENT"
           echo "==============================="
-          # body 필드 내의 백슬래시 이스케이프 처리
+          # body 필드 내의 백슬래시 이스케이프 처리 및 유효하지 않은 문자 제거 후 JSON 파싱 시도
           ESCAPED_COMMENT=$(echo "$CLEANED_COMMENT" | jq -c '. | map(.body = gsub("\\\\", "\\\\\\\\"))' || echo "[]")
-          # 출력 불가능한 문자 제거 후 GITHUB_OUTPUT에 설정
-          COMMENT=$(echo "$ESCAPED_COMMENT" | sed 's/[^[:print:]]//g')
+          COMMENT=$(echo "$ESCAPED_COMMENT" | sed 's/[^[:print:]]//g' | jq -c . || echo "[]")
           echo "comment=$COMMENT" >> $GITHUB_OUTPUT
 
       - name: Add Pull Request Review Comment # PR에 코드 리뷰 코멘트 추가 단계
