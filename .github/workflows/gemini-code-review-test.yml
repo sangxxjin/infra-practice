@@ -57,7 +57,7 @@ jobs:
             const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash"});
 
 
-            let prompt = `Explain in English. As a highly experienced software engineer,
+            let prompt = `Explain in Korean. As a highly experienced software engineer,
             your task is to conduct a thorough code review based on the provided git diff.
             Your analysis should identify areas for improvement in the changed code,
             focusing on logic, potential bugs, efficiency, security, and readability.
